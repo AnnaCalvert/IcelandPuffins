@@ -1,0 +1,142 @@
+---
+title: "Puffin colour banding 2016-2021"
+author: "Anna"
+date: "`r format(Sys.time(), '%d %B, %Y %H:%M:%S')`"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+Notes about the data set: These models are now just running the truncated colour-banding data, from 2016-2021, given that there were so many earlier years with no recapture effort. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+```{r, include=FALSE}
+
+#Load project settings
+library(here)
+source(here::here("project_settings.R"), echo=T)
+
+```
+###############################################################
+### 1- Import data and format for RMARK
+###############################################################
+```{r}
+
+#bring in the inp file from Erpur, but we'll want to only keep digits 9-14 from the ch string:
+puff <- convert.inp(here(CMR.dir, "colour banding/Puffin Colour SH 2021.inp"))
+puff.recent <- puff
+puff.recent$ch <- substr(puff$ch, 9, 14)
+#and then need to delete any rows with all 0s
+puff.recent <- puff.recent %>% filter(!ch =="000000")
+nrow(puff.recent)
+#So there are now 182 banded birds in the data set from 2016-2021
+
+puff.recent.processed <- process.data(puff.recent, model = 'CJS', begin.time=2016)
+puff.recent.ddl <- make.design.data(puff.recent.processed)
+
+# add tsm structure
+puff.recent.ddl <- add.design.data(puff.recent.processed, puff.recent.ddl,
+                            parameter="Phi", type="age", bins=c(0,1, 17),name="tsm",
+                            right = F, replace = T)
+
+summary_ch(puff.recent.processed, marray = T)
+
+
+```
+###############################################################
+### 2- Set up parameter variation structure and run general model
+###############################################################
+```{r}
+#parameter variation structure  (include tsm from the start)
+Phi.dot <- list(formula = ~1)
+Phi.t <- list(formula = ~time)
+Phi.tsm <- list(formula =~ tsm)
+Phi.tsmplust <- list(formula = ~tsm + time)
+p.dot <- list(formula = ~1)
+p.t <- list(formula = ~time)
+```
+##############################################################
+### 3- Goodness of Fit testing
+##############################################################
+```{r}
+#RELEASE/UCARE tests
+# export capture history as inp and import again to use with R2ucare
+export.chdata(puff.recent.processed, filename="puffin colourband 2016-21.ch" ,replace=TRUE)
+
+puff.recent.inp = read_inp("puffin colourband 2016-21.ch")
+
+puff.recent.hist = puff.recent.inp$encounter_histories
+puff.recent.freq = puff.recent.inp$sample_size
+
+
+overall_CJS(puff.recent.inp$encounter_histories, puff.recent.inp$sample_size) #significant
+#Not significant
+test3sr(puff.recent.inp$encounter_histories, puff.recent.inp$sample_size)
+test3sm(puff.recent.inp$encounter_histories, puff.recent.inp$sample_size)
+test2ct(puff.recent.inp$encounter_histories, puff.recent.inp$sample_size)
+test2cl(puff.recent.inp$encounter_histories, puff.recent.inp$sample_size)
+#all not significant
+
+##Bootstrap GOF 
+#first we need to build a general model 
+global<-mark(puff.recent.processed, puff.recent.ddl, model="CJS", model.parameters=list(Phi=Phi.tsmplust, p=p.t))
+cat("global model: ",global$model.name)
+
+#And now we should be able to just call Greg's bootstrap function to run on this model
+source(file.path(R.dir, "CMR/CMR utilities/bootstrap_deviance.R"))
+bootstrap.deviance(global, 10, tsm=TRUE)
+#working fine here (not sure why it wouldn't work for 2008-21 dataset?)
+#gives c-hat lower than 1 (0.9666), and CJS was also non significant, so not making any adjustment for overdispersion
+
+```
+##############################################################
+### 4- Run full model set
+##############################################################
+```{r}
+#create whole model set
+model.list=create.model.list("CJS") # models to test
+cat("number of models in candidate set:", nrow(model.list))  #  8 models total
+
+all.models=mark.wrapper(model.list,data=puff.recent.processed,ddl=puff.recent.ddl,threads=2,output=F,silent=T)
+options(scipen = 999) # disable scientific notation for easier reading
+results <- all.models$model.table
+
+kbl(results) %>% kable_styling(bootstrap_options = c("striped", "hover"), fixed_thead = T)  %>% scroll_box(width = "100%", height = "500px")
+
+```
+
+##############################################################
+### 5- Explore specific estimates from top models
+#############################################################
+Top-ranked model is Phi(tsm+t)p(.) but many models very closely ranked, and time-variant-Phi models include mostly boundary estimates (i.e. not estimable)
+
+```{r}
+top.model <- select_model_results(model_num = 4)
+top.model$model.name
+PIMS(top.model, parameter = "Phi")
+round(top.model$results$real[,1:4],4)
+#lots of boundary estimates - not really much of value in time-variant
+
+#so look at time-invariant survival, with or without tsm (transient) effect:
+
+Phidotpdot.model <- select_model_results(model_num=1)
+Phidotpdot.model$model.name
+PIMS(Phidotpdot.model, parameter = "Phi")
+round(Phidotpdot.model$results$real[,1:4],4)
+# mean survival 0.971 without transient effect
+
+Phitsmpdot.model <- select_model_results(model_num=7)
+Phitsmpdot.model$model.name
+PIMS(Phitsmpdot.model, parameter = "Phi")
+round(Phitsmpdot.model$results$real[,1:4],4)
+#non-transient survival estimated at 1 (boundary, i.e. not estimated properly)
+
+```
+### MAIN RESULT: The best estimate of mean adult puffin survival from the truncated colour banding data set, using only 2016-2021 data, is 0.971. Note, however, that many parameters were poorly estimated in this short data set, and that a tsm (transient) model did not produce a good estimate of survival.
+
+```{r, include=FALSE}
+### IMPORTANT LAST STEP: get rid of junk MARK files!
+force.cleanup(recursive = TRUE)
+```
